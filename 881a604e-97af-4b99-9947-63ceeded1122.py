@@ -2,6 +2,8 @@ import os
 import re
 import shutil
 import subprocess
+import json
+import datetime
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
 from mutagen import File
@@ -11,17 +13,44 @@ api_id = '10074048'
 api_hash = 'a08b1ed3365fa3b04bcf2bcbf71aff4d'
 session_name = 'beatport_downloader'
 
+# Replace this with your own Telegram user ID
+YOUR_USER_ID = 616584208
+
 # Regular expressions for Beatport and Crates.co URLs
 beatport_pattern = '^https:\/\/www\.beatport\.com\/track\/[\w -]+\/\d+$'
 crates_pattern = '^https:\/\/crates\.co\/track\/[\w -]+\/\d+$'
 
-# Dictionary to store temporary states for each user
+# Temporary user states
 state = {}
 
-# Initialize the client
-client = TelegramClient(session_name, api_id, api_hash)
+# Authorized users file
+AUTHORIZED_USERS_FILE = 'authorized_users.json'
 
-# Start the client and listen for new messages
+# Load/save authorized users
+def load_authorized_users():
+    try:
+        with open(AUTHORIZED_USERS_FILE, 'r') as f:
+            data = json.load(f)
+            return {int(k): datetime.datetime.fromisoformat(v) for k, v in data.items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"Error loading authorized users: {e}")
+        return {}
+
+def save_authorized_users():
+    try:
+        with open(AUTHORIZED_USERS_FILE, 'w') as f:
+            data = {str(k): v.isoformat() for k, v in authorized_users.items()}
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving authorized users: {e}")
+
+# Initialize client and users
+client = TelegramClient(session_name, api_id, api_hash)
+authorized_users = load_authorized_users()
+
+# Handlers
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     await event.reply("Hi! I'm Beatport Track Downloader using MTProto API.\n\n"
@@ -34,18 +63,21 @@ async def start_handler(event):
 @client.on(events.NewMessage(pattern='/download'))
 async def download_handler(event):
     try:
+        # Check if user is authorized
+        now = datetime.datetime.utcnow()
+        expiry = authorized_users.get(event.sender_id)
+        if not expiry or expiry < now:
+            await event.reply("You're not authorized to use this bot or your access has expired.")
+            return
+
         input_text = event.message.text.split(maxsplit=1)[1]
-        
-        # Validate the track URL against Beatport and Crates.co patterns
         is_beatport = re.match(rf'{beatport_pattern}', input_text)
         is_crates = re.match(rf'{crates_pattern}', input_text)
 
         if is_beatport or is_crates:
-            # Convert Crates.co link to Beatport link if necessary
             if is_crates:
                 input_text = input_text.replace('crates.co', 'www.beatport.com')
 
-            # Save the input URL in the state dictionary for this user
             state[event.chat_id] = input_text
 
             await event.reply("Please choose the format:", buttons=[
@@ -59,71 +91,112 @@ async def download_handler(event):
 @client.on(events.CallbackQuery)
 async def callback_query_handler(event):
     try:
-        # Get the selected format
         format_choice = event.data.decode('utf-8')
-
-        # Retrieve the input URL from the state dictionary
         input_text = state.get(event.chat_id)
         if not input_text:
             await event.edit("No URL found. Please start the process again using /download.")
             return
 
-        # Confirm the user's choice and remove the buttons
         await event.edit(f"You selected {format_choice.upper()}. Downloading the file...")
 
         url = urlparse(input_text)
         components = url.path.split('/')
-
-        # Run the orpheus script to download the track
         os.system(f'python orpheus.py {input_text}')
 
-        # Get the downloaded filename
         download_dir = f'downloads/{components[-1]}'
         filename = os.listdir(download_dir)[0]
         filepath = f'{download_dir}/{filename}'
 
-        # Convert the downloaded file to the chosen format
         converted_filepath = f'{download_dir}/{filename}.{format_choice}'
         if format_choice == 'flac':
             subprocess.run(['ffmpeg', '-i', filepath, converted_filepath])
         elif format_choice == 'mp3':
             subprocess.run(['ffmpeg', '-i', filepath, '-b:a', '320k', converted_filepath])
 
-        # Extract metadata using mutagen
         audio = File(converted_filepath, easy=True)
         artist = audio.get('artist', ['Unknown Artist'])[0]
         title = audio.get('title', ['Unknown Title'])[0]
 
-        # Clean semicolons in metadata fields
         for field in ['artist', 'title', 'album', 'genre']:
             if field in audio:
                 audio[field] = [value.replace(";", ", ") for value in audio[field]]
         audio.save()
 
-        # Create the new filename based on artist and title
-        new_filename = f"{artist} - {title}.{format_choice}"
-
-        # Replace ";" with ", " in the filename
-        new_filename = new_filename.replace(";", ", ")
-
+        new_filename = f"{artist} - {title}.{format_choice}".replace(";", ", ")
         new_filepath = f'{download_dir}/{new_filename}'
 
-        # Rename the converted file
         os.rename(converted_filepath, new_filepath)
-
-        # Send the renamed file to the user
         await client.send_file(event.chat_id, new_filepath)
 
-        # Clean up the downloaded files
         shutil.rmtree(download_dir)
-
-        # Clear the state for the user
         del state[event.chat_id]
     except Exception as e:
         await event.reply(f"An error occurred during conversion: {e}")
 
+@client.on(events.NewMessage(pattern='/add'))
+async def add_user(event):
+    try:
+        if event.sender_id != YOUR_USER_ID:
+            await event.reply("You don't have permission to use this command.")
+            return
+
+        if len(event.message.text.split()) < 2:
+            await event.reply("Usage: /add <user_id>")
+            return
+
+        user_id = int(event.message.text.split()[1])
+        expiry_date = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+        authorized_users[user_id] = expiry_date
+        save_authorized_users()
+        await event.reply(f"User {user_id} added with access until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    except Exception as e:
+        await event.reply(f"Error adding user: {e}")
+
+@client.on(events.NewMessage(pattern='/remove'))
+async def remove_user(event):
+    try:
+        if event.sender_id != YOUR_USER_ID:
+            await event.reply("You don't have permission to use this command.")
+            return
+
+        if len(event.message.text.split()) < 2:
+            await event.reply("Usage: /remove <user_id>")
+            return
+
+        user_id = int(event.message.text.split()[1])
+        if user_id in authorized_users:
+            del authorized_users[user_id]
+            save_authorized_users()
+            await event.reply(f"User {user_id} has been removed.")
+        else:
+            await event.reply("User not found in the authorized list.")
+    except Exception as e:
+        await event.reply(f"Error removing user: {e}")
+
+@client.on(events.NewMessage(pattern='/list_users'))
+async def list_users(event):
+    try:
+        if event.sender_id != YOUR_USER_ID:
+            await event.reply("You don't have permission to use this command.")
+            return
+
+        if not authorized_users:
+            await event.reply("No users are currently authorized.")
+            return
+
+        lines = ["**Authorized Users:**"]
+        now = datetime.datetime.utcnow()
+        for uid, expiry in authorized_users.items():
+            status = "Active" if expiry > now else "Expired"
+            lines.append(f"User ID: `{uid}` - Expires: `{expiry.strftime('%Y-%m-%d %H:%M:%S')}` UTC - {status}")
+
+        await event.reply('\n'.join(lines), parse_mode='markdown')
+    except Exception as e:
+        await event.reply(f"Error listing users: {e}")
+
 async def main():
-    # Start the Telegram client
+    global authorized_users
+    authorized_users = load_authorized_users()
     async with client:
         print("Client is running...")
         await client.run_until_disconnected()
