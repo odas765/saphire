@@ -7,47 +7,60 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    # -------------------------------------------------------------
-    # 1. Set up Ngrok and enable RDP on the GitHub-hosted runner
-    # -------------------------------------------------------------
+    # ------------------------------------------------------------
+    # 1) Download & set up Ngrok (v3)
+    # ------------------------------------------------------------
     - name: Download Ngrok
       run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
 
     - name: Extract Ngrok
       run: Expand-Archive ngrok.zip
 
-    - name: Auth Ngrok
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+    - name: Configure Ngrok authtoken
+      shell: pwsh
+      run: .\ngrok\ngrok.exe config add-authtoken $Env:NGROK_AUTH_TOKEN
       env:
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
+    # ------------------------------------------------------------
+    # 2) Enable RDP on this Windows runner
+    # ------------------------------------------------------------
     - name: Enable Remote Desktop
       run: |
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
 
-    - name: Set RDP Password
-      # ⚠️  Replace the hard-coded password with a secret for real use:
-      #     Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
+    - name: Set runneradmin password   # ↙ Replace with secret for real use
       run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
-    - name: Start Ngrok Tunnel (TCP 3389)
-      run: Start-Process -NoNewWindow -FilePath .\ngrok\ngrok.exe -ArgumentList "tcp 3389"
-
-    # -------------------------------------------------------------
-    # 2. Create a Startup-folder shortcut so Chrome opens on login
-    #    • Skips ALL first-run / default-browser prompts
-    #    • Goes straight to https://www.google.com
-    # -------------------------------------------------------------
-    - name: Auto-launch Chrome with no setup prompts
+    # ------------------------------------------------------------
+    # 3) Start the Ngrok TCP tunnel and output the public address
+    # ------------------------------------------------------------
+    - name: Start Ngrok tunnel (tcp 3389) and show endpoint
       shell: pwsh
       run: |
-        # Locate chrome.exe (32-bit or 64-bit path on the runner)
-        $chrome = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
-        if (-not (Test-Path $chrome)) {
-          $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+        ./ngrok/ngrok.exe tcp 3389 --log=stdout > ngrok.log 2>&1 &
+        Start-Sleep -Seconds 5
+        $tunnels = Invoke-RestMethod -Uri http://127.0.0.1:4040/api/tunnels
+        if ($tunnels.tunnels.Count -gt 0) {
+          $addr = $tunnels.tunnels[0].public_url -replace 'tcp://', ''
+          Write-Host "🔗 RDP endpoint: $addr"
+          Write-Host "   Username   : runneradmin"
+          Write-Host "   Password   : P@ssw0rd!"
+        } else {
+          Write-Warning "Ngrok started but no tunnels found—see ngrok.log."
         }
+
+    # ------------------------------------------------------------
+    # 4) Add a Startup shortcut so Chrome opens automatically
+    #    (bypasses first-run prompts, opens google.com)
+    # ------------------------------------------------------------
+    - name: Auto-launch Chrome (no first-run) to google.com
+      shell: pwsh
+      run: |
+        $chrome = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+        if (-not (Test-Path $chrome)) { $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe" }
 
         if (Test-Path $chrome) {
           $startup  = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
@@ -55,8 +68,8 @@ jobs:
 
           $wshell = New-Object -ComObject WScript.Shell
           $sc     = $wshell.CreateShortcut($shortcut)
-          $sc.TargetPath = $chrome
-          $sc.Arguments  = "--no-first-run --no-default-browser-check --disable-features=WelcomeScreen --disable-background-mode https://www.google.com"
+          $sc.TargetPath   = $chrome
+          $sc.Arguments    = "--no-first-run --no-default-browser-check --disable-features=WelcomeScreen --disable-background-mode https://www.google.com"
           $sc.IconLocation = $chrome
           $sc.Save()
         } else {
