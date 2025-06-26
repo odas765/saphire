@@ -1,65 +1,64 @@
 name: CI
 
-
-
 on: [push, workflow_dispatch]
 
-
-
 jobs:
-
-
   build:
-
-
-
     runs-on: windows-latest
 
-
-
     steps:
-
-
-    - name: Download
-
-
+    # -------------------------------------------------------------
+    # 1. Set up Ngrok and enable RDP on the GitHub-hosted runner
+    # -------------------------------------------------------------
+    - name: Download Ngrok
       run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
 
-
-    - name: Extract
-
-
+    - name: Extract Ngrok
       run: Expand-Archive ngrok.zip
 
-
-    - name: Auth
-
-
+    - name: Auth Ngrok
       run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-
-
       env:
-
-
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
+    - name: Enable Remote Desktop
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
 
-    - name: Enable TS
+    - name: Set RDP Password
+      # ⚠️  Replace the hard-coded password with a secret for real use:
+      #     Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)
+      run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
 
+    - name: Start Ngrok Tunnel (TCP 3389)
+      run: Start-Process -NoNewWindow -FilePath .\ngrok\ngrok.exe -ArgumentList "tcp 3389"
 
-      run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
+    # -------------------------------------------------------------
+    # 2. Create a Startup-folder shortcut so Chrome opens on login
+    #    • Skips ALL first-run / default-browser prompts
+    #    • Goes straight to https://www.google.com
+    # -------------------------------------------------------------
+    - name: Auto-launch Chrome with no setup prompts
+      shell: pwsh
+      run: |
+        # Locate chrome.exe (32-bit or 64-bit path on the runner)
+        $chrome = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+        if (-not (Test-Path $chrome)) {
+          $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+        }
 
+        if (Test-Path $chrome) {
+          $startup  = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+          $shortcut = "$startup\LaunchGoogle.lnk"
 
-    - run: Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-
-    - run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-
-
-    - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
-
-
-    - name: Create Tunnel
-
-
-      run: .\ngrok\ngrok.exe tcp 3389
+          $wshell = New-Object -ComObject WScript.Shell
+          $sc     = $wshell.CreateShortcut($shortcut)
+          $sc.TargetPath = $chrome
+          $sc.Arguments  = "--no-first-run --no-default-browser-check --disable-features=WelcomeScreen --disable-background-mode https://www.google.com"
+          $sc.IconLocation = $chrome
+          $sc.Save()
+        } else {
+          Write-Warning "Chrome executable not found (unexpected on windows-latest runner)."
+        }
