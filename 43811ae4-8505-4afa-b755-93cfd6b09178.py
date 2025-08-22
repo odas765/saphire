@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import json
 import zipfile
+import asyncio
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
@@ -422,14 +423,28 @@ async def total_users_handler(event):
     await event.reply(f"👥 Total registered users: <b>{total}</b>", parse_mode='html')
 
 
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
+
+def make_progress_bar(done, total, length=10):
+    if total == 0:
+        return "📦 [░░░░░░░░░░] 0%"
+    filled = int(length * done / total)
+    bar = "█" * filled + "░" * (length - filled)
+    percent = int((done / total) * 100)
+    return f"[{bar}] {percent}%"
 
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
         user_id = event.chat_id
-        input_text = event.message.text.split(maxsplit=1)[1].strip()
+        args = event.message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await event.reply("❌ Please provide a Beatport playlist link.")
+            return
+        input_text = args[1].strip()
 
-        # === URL check ===
+        # === Validate link ===
         if not re.match(beatport_playlist_pattern, input_text):
             await event.reply("❌ Invalid link.\nPlease send a valid Beatport playlist URL.")
             return
@@ -442,7 +457,7 @@ async def playlist_handler(event):
             await event.reply("🚫 Playlist downloads are only available for premium users.")
             return
 
-        await event.reply("⏳ Downloading playlist... Please wait.")
+        status = await event.reply("⬇️ Starting playlist download...")
 
         # === Run Orpheus ===
         url = urlparse(input_text)
@@ -453,27 +468,83 @@ async def playlist_handler(event):
         os.system(f'python orpheus.py {input_text}')
 
         if not os.path.exists(root_path):
-            await event.reply("⚠️ Failed to download playlist.")
+            await status.edit("⚠️ Failed to download playlist.")
             return
 
-        # === Zip the playlist ===
-        zip_path = f"{root_path}.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(root_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, root_path)
-                    zipf.write(file_path, arcname)
+        # === Collect files + metadata ===
+        track_count = 0
+        playlist_name = "Playlist"
+        cover_file = None
+        all_files = []
 
-        # === Send zip to user ===
-        await client.send_file(event.chat_id, zip_path, caption="📂 Here is your playlist download!")
+        for root, _, files in os.walk(root_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, root_path)
+                all_files.append((file_path, arcname))
+
+                if file.lower().endswith(('.flac', '.mp3', '.wav')):
+                    track_count += 1
+                    audio = File(file_path, easy=True)
+                    if audio and 'album' in audio and playlist_name == "Playlist":
+                        playlist_name = audio['album'][0]
+
+                if file.lower().startswith("cover") and file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    cover_file = file_path
+
+        caption = (
+            f"<b>📂 Playlist:</b> {playlist_name}\n"
+            f"<b>🎵 Total Tracks:</b> {track_count}"
+        )
+
+        if cover_file:
+            await client.send_file(event.chat_id, cover_file, caption=caption, parse_mode='html')
+        else:
+            await status.edit(caption, parse_mode='html')
+
+        # === Zip with progress ===
+        safe_name = sanitize_filename(playlist_name or "Playlist")
+        zip_path = f"{safe_name}.zip"
+        total_files = len(all_files)
+        done = 0
+
+        await status.edit(f"📦 Zipping files...\n{make_progress_bar(0, total_files)}")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path, arcname in all_files:
+                zipf.write(file_path, arcname)
+                done += 1
+                if done % max(1, total_files // 10) == 0 or done == total_files:
+                    await status.edit(f"📦 Zipping files...\n{make_progress_bar(done, total_files)}")
+                await asyncio.sleep(0)
+
+        # === Upload with progress ===
+        async def upload_progress(current, total):
+            try:
+                bar = make_progress_bar(current, total)
+                await status.edit(f"⬆️ Uploading...\n{bar}")
+            except:
+                pass
+
+        await client.send_file(
+            event.chat_id,
+            zip_path,
+            caption=f"📦 {playlist_name}",
+            force_document=True,
+            progress_callback=upload_progress
+        )
 
         # === Cleanup ===
-        shutil.rmtree(root_path)
+        shutil.rmtree(root_path, ignore_errors=True)
         os.remove(zip_path)
+        await status.edit("✅ Done! Playlist sent.")
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
+
+
+
+
+
 
 @client.on(events.NewMessage(pattern='/alert'))
 async def alert_expiry_handler(event):
