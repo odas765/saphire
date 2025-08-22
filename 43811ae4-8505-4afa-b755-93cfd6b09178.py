@@ -193,13 +193,13 @@ async def download_handler(event):
         is_album = re.match(beatport_album_pattern, input_text)
         is_playlist = re.match(beatport_playlist_pattern, input_text)
 
-if is_track or is_album or is_playlist:
-    if is_album:
-        content_type = 'album'
-    elif is_track:
-        content_type = 'track'
-    else:
-        content_type = 'playlist'
+        if is_track or is_album or is_playlist:   # ✅ indented
+            if is_album:
+                content_type = 'album'
+            elif is_track:
+                content_type = 'track'
+            else:
+                content_type = 'playlist'
 
     # ✅ Block free users from playlists
     if content_type == 'playlist' and user_id not in ADMIN_IDS:
