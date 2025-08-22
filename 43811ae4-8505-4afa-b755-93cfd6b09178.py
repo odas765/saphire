@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import json
+import zipfile
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
@@ -14,6 +15,7 @@ session_name = 'beatport_downloader'
 
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
+beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -481,6 +483,81 @@ async def alert_expiry_handler(event):
         f"✅ Expiry alerts sent to <b>{notified}</b> users.\n❌ Failed for <b>{failed}</b> users.",
         parse_mode='html'
     )
+
+@client.on(events.NewMessage(pattern='/playlist'))
+async def playlist_handler(event):
+    try:
+        user_id = event.chat_id
+        input_text = event.message.text.split(maxsplit=1)[1].strip()
+        is_playlist = re.match(beatport_playlist_pattern, input_text)
+
+        if not is_playlist:
+            await event.reply("❌ Invalid link.\nPlease send a valid Beatport playlist URL.")
+            return
+
+        # Only whitelist users can use playlists
+        users = load_users()
+        user = users.get(str(user_id), {})
+        expiry = user.get("expiry")
+        if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
+            await event.reply("🚫 Playlist downloads are available only for premium users.\nUpgrade to unlock unlimited access!")
+            return
+
+        await event.reply("🎶 Playlist detected! Downloading and converting to FLAC...")
+
+        # Run orpheus downloader
+        os.system(f'python orpheus.py {input_text}')
+
+        # Playlist directory will be in downloads/<playlist_id>
+        url = urlparse(input_text)
+        components = url.path.split('/')
+        playlist_id = components[-1]
+        root_path = f'downloads/{playlist_id}'
+
+        if not os.path.exists(root_path):
+            await event.reply("⚠️ Download failed or directory not found.")
+            return
+
+        # Process each track
+        files = []
+        for f in os.listdir(root_path):
+            track_path = os.path.join(root_path, f)
+            if os.path.isfile(track_path) and not f.lower().endswith('.flac'):
+                converted_path = f"{track_path}.flac"
+                subprocess.run(['ffmpeg', '-y', '-i', track_path, converted_path])
+
+                audio = File(converted_path, easy=True)
+                artist = audio.get('artist', ['Unknown Artist'])[0]
+                title = audio.get('title', ['Unknown Title'])[0]
+                for field in ['artist', 'title', 'album', 'genre']:
+                    if field in audio:
+                        audio[field] = [value.replace(";", ", ") for value in audio[field]]
+                audio.save()
+
+                final_name = f"{artist} - {title}.flac".replace(";", ", ")
+                final_path = os.path.join(root_path, final_name)
+                os.rename(converted_path, final_path)
+                files.append(final_path)
+
+        if not files:
+            await event.reply("⚠️ No tracks were found in the playlist download.")
+            shutil.rmtree(root_path, ignore_errors=True)
+            return
+
+        # Create zip archive
+        zip_path = f"{root_path}.zip"
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for file in files:
+                zipf.write(file, os.path.basename(file))
+
+        await client.send_file(event.chat_id, zip_path, caption="✅ Here is your playlist (FLAC, zipped).")
+
+        # Cleanup
+        shutil.rmtree(root_path, ignore_errors=True)
+        os.remove(zip_path)
+
+    except Exception as e:
+        await event.reply(f"⚠️ An error occurred while processing playlist: {e}")
     
 async def main():
     async with client:
