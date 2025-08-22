@@ -97,22 +97,25 @@ async def start_handler(event):
     banner_path = 'banner.gif'  # Your banner image/gif in working dir
     caption = (
         "🎧 Hey DJ! 🎶\n\n"
-        "Welcome to Beatport Downloader Bot – your assistant for downloading full Beatport tracks & albums.\n\n"
-        "❓ What I Can Do:\n"
-        "🎵 Download original-quality Beatport releases\n"
-        "📁 Send you organized, tagged audio files\n\n"
-        "📋 Commands:\n"
-        "➤ /download beatport url – Start download\n"
-        "➤ /myaccount – Check daily usage\n\n"
-        "🚀 Paste a Beatport link now and let’s get those bangers!"
+        "Welcome to <b>Beatport Playlist Downloader</b> – "
+        "an exclusive <b>premium module</b> of the main bot "
+        "<a href='https://t.me/beatportdownloadersbot'>@beatportdownloadersbot</a>.\n\n"
+        "💎 <b>Premium Only:</b>\n"
+        "This bot is available exclusively for premium subscribers. "
+        "If you're <b>not premium</b>, click the button below to donate "
+        "and contact the owner <a href='https://t.me/zackantdev'>@zackantdev</a>.\n\n"
+        "📋 <b>Command:</b>\n"
+        "➤ <code>/playlist playlistlink</code> – Download full Beatport playlists as tagged FLAC files in a single ZIP.\n\n"
+        "🚀 Enjoy unlimited playlist downloads with your premium access!"
     )
     buttons = [
-        [Button.url("💟 Support", PAYMENT_URL), Button.url("📨 Contact", "https://t.me/zackantdev")]
+        [Button.url("💟 Donate & Upgrade", PAYMENT_URL),
+         Button.url("📨 Contact Owner", "https://t.me/zackantdev")]
     ]
     if os.path.exists(banner_path):
-        await client.send_file(event.chat_id, banner_path, caption=caption, buttons=buttons)
+        await client.send_file(event.chat_id, banner_path, caption=caption, buttons=buttons, parse_mode="html")
     else:
-        await event.reply(caption, buttons=buttons)
+        await event.reply(caption, buttons=buttons, parse_mode="html")
 
 @client.on(events.NewMessage(pattern='/add'))
 async def add_user_handler(event):
