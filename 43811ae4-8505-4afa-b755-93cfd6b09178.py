@@ -189,11 +189,13 @@ async def download_handler(event):
     try:
         user_id = event.chat_id
         input_text = event.message.text.split(maxsplit=1)[1].strip()
+
+        # ✅ Regex checks
         is_track = re.match(beatport_track_pattern, input_text)
         is_album = re.match(beatport_album_pattern, input_text)
         is_playlist = re.match(beatport_playlist_pattern, input_text)
 
-        if is_track or is_album or is_playlist:   # ✅ indented
+        if is_track or is_album or is_playlist:
             if is_album:
                 content_type = 'album'
             elif is_track:
@@ -201,36 +203,29 @@ async def download_handler(event):
             else:
                 content_type = 'playlist'
 
-    # ✅ Block free users from playlists
-    if content_type == 'playlist' and user_id not in ADMIN_IDS:
-        users = load_users()
-        user = users.get(str(user_id), {})
-        expiry = user.get("expiry")
-        if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
-            await event.reply(
-                "🚫 Playlist downloads are available for premium users only.\n\n"
-                "Unlock unlimited downloads by supporting with a $5 payment:",
-                buttons=[Button.url("💳 Upgrade to Premium", PAYMENT_URL)]
-            )
-            return
+            # ✅ Block free users from playlists
+            if content_type == 'playlist' and user_id not in ADMIN_IDS:
+                users = load_users()
+                user = users.get(str(user_id), {})
+                expiry = user.get("expiry")
+                if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
+                    await event.reply(
+                        "🚫 Playlist downloads are available for premium users only.\n\n"
+                        "Unlock unlimited downloads by supporting with a $5 payment:",
+                        buttons=[Button.url("💳 Upgrade to Premium", PAYMENT_URL)]
+                    )
+                    return
 
-            if not is_user_allowed(user_id, content_type):
-                await event.reply(
-                    "🚫 You've reached today's free download limit (2 albums / 2 tracks).\n"
-                    "To unlock unlimited downloads for 30 days, please support with a $5 payment and send the proof to @zackantdev",
-                    buttons=[Button.url("💳 Pay $5", PAYMENT_URL)]
-                )
-                return
-
+            # Save state for format choice
             state[event.chat_id] = {"url": input_text, "type": content_type}
             await event.reply("Please choose the format:", buttons=[
                 [Button.inline("MP3 (320 kbps)", b"mp3"), Button.inline("FLAC (16 Bit)", b"flac")]
             ])
         else:
-            await event.reply('Invalid link.\nPlease send a valid Beatport track or album URL.')
+            await event.reply('Invalid link.\nPlease send a valid Beatport track, album, or playlist URL.')
+
     except Exception as e:
         await event.reply(f"An error occurred: {e}")
-
 @client.on(events.CallbackQuery)
 async def callback_query_handler(event):
     try:
