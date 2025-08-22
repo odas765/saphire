@@ -22,7 +22,7 @@ beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
 PAYMENT_URL = "https://ko-fi.com/zackant"
-USERS_FILE = '/home/ubuntu/demosite/users.json'
+USERS_FILE = 'users.json'
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -428,35 +428,6 @@ async def total_users_handler(event):
 
 
 
-def make_progress_bar(done, total, length=10):
-    filled = int(length * done / total) if total > 0 else 0
-    bar = "█" * filled + "░" * (length - filled)
-    percent = (done / total) * 100 if total > 0 else 0
-    return percent, bar
-
-async def show_progress(status_message, done_bytes, total_bytes, start_time):
-    elapsed = time.time() - start_time
-    done_mb = done_bytes / 1024 / 1024
-    total_mb = total_bytes / 1024 / 1024
-    speed_kb = (done_bytes / 1024) / elapsed if elapsed > 0 else 0.01  # KB/sec
-    remaining_bytes = total_bytes - done_bytes
-    eta_sec = remaining_bytes / 1024 / speed_kb if speed_kb > 0 else 0
-    eta_min = int(eta_sec // 60)
-    eta_sec_remain = int(eta_sec % 60)
-
-    percent, bar = make_progress_bar(done_bytes, total_bytes)
-    msg = (
-        f"Downloading: {percent:.1f}%\n\n"
-        f"[{bar}]\n\n"
-        f"🚀 Speed: {speed_kb:.2f} KB/sec\n"
-        f"✅ Done: {done_mb:.2f} MB\n"
-        f"🔰 Size: {total_mb:.2f} MB\n"
-        f"⏰ Time Left: {eta_min} min {eta_sec_remain} sec"
-    )
-    try:
-        await status_message.edit(msg)
-    except:
-        pass
 
 
 @client.on(events.NewMessage(pattern='/playlist'))
@@ -535,28 +506,17 @@ async def playlist_handler(event):
                 if os.path.exists(input_path) and input_path != final_path:
                     os.remove(input_path)
 
-        # === Zip with progress ===
+        # === Zip ===
         zip_path = f"playlist_{playlist_id}.zip"
-        done_bytes = 0
-        total_size = sum(os.path.getsize(f) for f in converted_files)
-        start_time = time.time()
-
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for file_path in converted_files:
                 zipf.write(file_path, os.path.basename(file_path))
-                done_bytes += os.path.getsize(file_path)
-                await show_progress(status, done_bytes, total_size, start_time)
-                await asyncio.sleep(0)
 
-        # === Upload with progress ===
-        async def upload_progress(current, total):
-            await show_progress(status, current, total, start_time)
-
+        # === Upload ===
         await client.send_file(
             event.chat_id,
             zip_path,
-            force_document=True,
-            progress_callback=upload_progress
+            force_document=True
         )
 
         # === Cleanup ===
