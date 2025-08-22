@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import json
+import zipfile
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
@@ -14,6 +15,7 @@ session_name = 'beatport_downloader'
 
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
+beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlist\/[\w\-]+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -418,6 +420,60 @@ async def total_users_handler(event):
     users = load_users()
     total = len(users)
     await event.reply(f"👥 Total registered users: <b>{total}</b>", parse_mode='html')
+
+
+
+@client.on(events.NewMessage(pattern='/playlist'))
+async def playlist_handler(event):
+    try:
+        user_id = event.chat_id
+        input_text = event.message.text.split(maxsplit=1)[1].strip()
+
+        # === URL check ===
+        if not re.match(beatport_playlist_pattern, input_text):
+            await event.reply("❌ Invalid link.\nPlease send a valid Beatport playlist URL.")
+            return
+
+        # === Premium check ===
+        users = load_users()
+        user = users.get(str(user_id), {})
+        expiry = user.get("expiry")
+        if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
+            await event.reply("🚫 Playlist downloads are only available for premium users.")
+            return
+
+        await event.reply("⏳ Downloading playlist... Please wait.")
+
+        # === Run Orpheus ===
+        url = urlparse(input_text)
+        components = url.path.split('/')
+        playlist_id = components[-1]
+        root_path = f'downloads/{playlist_id}'
+
+        os.system(f'python orpheus.py {input_text}')
+
+        if not os.path.exists(root_path):
+            await event.reply("⚠️ Failed to download playlist.")
+            return
+
+        # === Zip the playlist ===
+        zip_path = f"{root_path}.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(root_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, root_path)
+                    zipf.write(file_path, arcname)
+
+        # === Send zip to user ===
+        await client.send_file(event.chat_id, zip_path, caption="📂 Here is your playlist download!")
+
+        # === Cleanup ===
+        shutil.rmtree(root_path)
+        os.remove(zip_path)
+
+    except Exception as e:
+        await event.reply(f"⚠️ Error while processing playlist: {e}")
 
 @client.on(events.NewMessage(pattern='/alert'))
 async def alert_expiry_handler(event):
