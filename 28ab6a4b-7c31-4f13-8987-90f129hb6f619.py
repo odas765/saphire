@@ -22,7 +22,7 @@ beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
 PAYMENT_URL = "https://ko-fi.com/zackant"
-USERS_FILE = 'users.json'
+USERS_FILE = '/home/ubuntu/demosite/users.json'
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -105,7 +105,7 @@ async def start_handler(event):
         "If you're <b>not premium</b>, click the button below to donate "
         "and contact the owner <a href='https://t.me/zackantdev'>@zackantdev</a>.\n\n"
         "📋 <b>Command:</b>\n"
-        "➤ <code>/playlist playlistlink</code> – Download full Beatport playlists as tagged FLAC files in a single ZIP.\n\n"
+        "➤ <code>/playlist playlist url</code> – Download full Beatport playlists in a single ZIP.\n\n"
         "🚀 Enjoy unlimited playlist downloads with your premium access!"
     )
     buttons = [
