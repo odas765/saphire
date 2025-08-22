@@ -428,8 +428,6 @@ async def total_users_handler(event):
 
 
 
-
-
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
@@ -453,14 +451,35 @@ async def playlist_handler(event):
             await event.reply("🚫 Playlist downloads are only available for premium users.")
             return
 
-        status = await event.reply("⬇️ Starting playlist download...")
+        status = await event.reply("🔎 Checking playlist info...")
 
-        # === Run Orpheus ===
+        # === Extract playlist ID ===
         url = urlparse(input_text)
         components = url.path.split('/')
         playlist_id = components[-1]
         root_path = f'downloads/{playlist_id}'
 
+        # === Dry run to count tracks ===
+        cmd = f'python orpheus.py --dry-run {input_text}'
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # Try to detect number of tracks from Orpheus output
+        track_count = 0
+        for line in result.stdout.splitlines():
+            if "Track:" in line or "track" in line.lower():
+                track_count += 1
+
+        if track_count == 0:
+            await status.edit("⚠️ Could not detect track count. Aborting.")
+            return
+
+        if track_count > 20:
+            await status.edit(f"🚫 Playlist too large!\nThis bot only supports playlists up to 20 tracks.\nYour playlist has **{track_count} tracks**.")
+            return
+
+        await status.edit(f"⬇️ Playlist has {track_count} tracks. Starting download...")
+
+        # === Run Orpheus download ===
         os.system(f'python orpheus.py {input_text}')
 
         if not os.path.exists(root_path):
@@ -488,21 +507,18 @@ async def playlist_handler(event):
                     title = audio.get('title', ['Unknown Title'])[0]
                     album = audio.get('album', ['Unknown Album'])[0]
 
-                    # Clean tags (replace semicolons with commas)
+                    # Clean tags
                     for field in ['artist', 'title', 'album', 'genre']:
                         if field in audio:
                             audio[field] = [v.replace(";", ", ") for v in audio[field]]
                     audio.save()
 
-                    # Final renamed path
                     safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
                     final_path = os.path.join(root, safe_name)
 
-                    # Replace/rename converted file
                     os.rename(tmp_output, final_path)
                     converted_files.append(final_path)
 
-                # remove original if different
                 if os.path.exists(input_path) and input_path != final_path:
                     os.remove(input_path)
 
@@ -526,6 +542,8 @@ async def playlist_handler(event):
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
+
+
 
 
 
