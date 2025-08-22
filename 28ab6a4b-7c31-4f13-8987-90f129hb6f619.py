@@ -455,6 +455,7 @@ async def show_progress(status_message, done_bytes, total_bytes, start_time):
     except:
         pass
 
+
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
@@ -492,26 +493,57 @@ async def playlist_handler(event):
             await status.edit("⚠️ Failed to download playlist.")
             return
 
-        # === Collect files for zipping ===
-        all_files = []
-        total_size = 0
+        # === Convert and rename to FLAC ===
+        converted_files = []
         for root, _, files in os.walk(root_path):
             for file in files:
-                file_path = os.path.join(root, file)
-                all_files.append(file_path)
-                total_size += os.path.getsize(file_path)
+                input_path = os.path.join(root, file)
+                if not file.lower().endswith((".mp3", ".flac", ".wav", ".aiff", ".m4a")):
+                    continue
+
+                # Temporary converted file
+                tmp_output = os.path.splitext(input_path)[0] + "_conv.flac"
+
+                # Convert to FLAC
+                subprocess.run(['ffmpeg', '-y', '-i', input_path, tmp_output])
+
+                # Read metadata
+                audio = File(tmp_output, easy=True)
+                if audio:
+                    artist = audio.get('artist', ['Unknown Artist'])[0]
+                    title = audio.get('title', ['Unknown Title'])[0]
+                    album = audio.get('album', ['Unknown Album'])[0]
+
+                    # Clean tags (replace semicolons with commas)
+                    for field in ['artist', 'title', 'album', 'genre']:
+                        if field in audio:
+                            audio[field] = [v.replace(";", ", ") for v in audio[field]]
+                    audio.save()
+
+                    # Final renamed path
+                    safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
+                    final_path = os.path.join(root, safe_name)
+
+                    # Replace/rename converted file
+                    os.rename(tmp_output, final_path)
+                    converted_files.append(final_path)
+
+                # remove original if different
+                if os.path.exists(input_path) and input_path != final_path:
+                    os.remove(input_path)
 
         # === Zip with progress ===
         zip_path = f"playlist_{playlist_id}.zip"
         done_bytes = 0
+        total_size = sum(os.path.getsize(f) for f in converted_files)
         start_time = time.time()
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in all_files:
+            for file_path in converted_files:
                 zipf.write(file_path, os.path.basename(file_path))
                 done_bytes += os.path.getsize(file_path)
                 await show_progress(status, done_bytes, total_size, start_time)
-                await asyncio.sleep(0)  # yield control
+                await asyncio.sleep(0)
 
         # === Upload with progress ===
         async def upload_progress(current, total):
@@ -531,8 +563,6 @@ async def playlist_handler(event):
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
-
-
 
 
 
