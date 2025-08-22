@@ -491,6 +491,31 @@ async def total_users_handler(event):
     total = len(users)
     await event.reply(f"👥 Total registered users: <b>{total}</b>", parse_mode='html')
 
+@client.on(events.NewMessage(pattern='/download_playlist'))
+async def download_playlist_handler(event):
+    try:
+        user_id = str(event.chat_id)
+        users = load_users()
+        user = users.get(user_id, {})
+
+        # Check whitelist / premium
+        if not user.get('expiry') or datetime.strptime(user['expiry'], '%Y-%m-%d') < datetime.utcnow():
+            await event.reply(
+                "🚫 Playlist downloads are premium only.\n💳 Upgrade here: " + PAYMENT_URL
+            )
+            return
+
+        input_text = event.message.text.split(maxsplit=1)[1].strip()
+        # Optional: Validate input URL (depends on how you fetch playlist tracks)
+        # For now, assume it’s a valid playlist URL
+
+        state[event.chat_id] = {"url": input_text, "type": "playlist"}
+        await event.reply("Please choose the format for your playlist:", buttons=[
+            [Button.inline("MP3 (320 kbps)", b"mp3"), Button.inline("FLAC (16 Bit)", b"flac")]
+        ])
+    except Exception as e:
+        await event.reply(f"An error occurred: {e}")
+
 @client.on(events.NewMessage(pattern='/alert'))
 async def alert_expiry_handler(event):
     if event.sender_id not in ADMIN_IDS:
