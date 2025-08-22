@@ -3,8 +3,6 @@ import re
 import shutil
 import subprocess
 import json
-import time
-import zipfile
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
@@ -16,7 +14,6 @@ session_name = 'beatport_downloader'
 
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
-beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -189,43 +186,29 @@ async def download_handler(event):
     try:
         user_id = event.chat_id
         input_text = event.message.text.split(maxsplit=1)[1].strip()
-
-        # ✅ Regex checks
         is_track = re.match(beatport_track_pattern, input_text)
         is_album = re.match(beatport_album_pattern, input_text)
-        is_playlist = re.match(beatport_playlist_pattern, input_text)
 
-        if is_track or is_album or is_playlist:
-            if is_album:
-                content_type = 'album'
-            elif is_track:
-                content_type = 'track'
-            else:
-                content_type = 'playlist'
+        if is_track or is_album:
+            content_type = 'album' if is_album else 'track'
 
-            # ✅ Block free users from playlists
-            if content_type == 'playlist' and user_id not in ADMIN_IDS:
-                users = load_users()
-                user = users.get(str(user_id), {})
-                expiry = user.get("expiry")
-                if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
-                    await event.reply(
-                        "🚫 Playlist downloads are available for premium users only.\n\n"
-                        "Unlock unlimited downloads by supporting with a $5 payment:",
-                        buttons=[Button.url("💳 Upgrade to Premium", PAYMENT_URL)]
-                    )
-                    return
+            if not is_user_allowed(user_id, content_type):
+                await event.reply(
+                    "🚫 You've reached today's free download limit (2 albums / 2 tracks).\n"
+                    "To unlock unlimited downloads for 30 days, please support with a $5 payment and send the proof to @zackantdev",
+                    buttons=[Button.url("💳 Pay $5", PAYMENT_URL)]
+                )
+                return
 
-            # Save state for format choice
             state[event.chat_id] = {"url": input_text, "type": content_type}
             await event.reply("Please choose the format:", buttons=[
                 [Button.inline("MP3 (320 kbps)", b"mp3"), Button.inline("FLAC (16 Bit)", b"flac")]
             ])
         else:
-            await event.reply('Invalid link.\nPlease send a valid Beatport track, album, or playlist URL.')
-
+            await event.reply('Invalid link.\nPlease send a valid Beatport track or album URL.')
     except Exception as e:
         await event.reply(f"An error occurred: {e}")
+
 @client.on(events.CallbackQuery)
 async def callback_query_handler(event):
     try:
@@ -315,51 +298,7 @@ async def callback_query_handler(event):
             increment_download(event.chat_id, content_type)
             del state[event.chat_id]
 
-        elif content_type == "playlist":
-            # ✅ Playlist downloads are premium-only
-            users = load_users()
-            user = users.get(str(event.chat_id), {})
-            expiry = user.get("expiry")
-            if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
-                await event.reply(
-                    "🚫 Playlist downloads are available for premium users only.\n\n"
-                    "Unlock unlimited downloads by supporting with a $5 payment:",
-                    buttons=[Button.url("💳 Upgrade to Premium", PAYMENT_URL)]
-                )
-                return
-
-            root_path = f'downloads/{release_id}'
-            files = [f for f in os.listdir(root_path) if f.lower().endswith('.flac')]
-
-            caption = f"<b>🎶 Playlist Download</b>\nTracks found: <b>{len(files)}</b>"
-            await event.reply(caption, parse_mode='html')
-
-            for filename in files:
-                input_path = os.path.join(root_path, filename)
-                output_path = f"{input_path}.{format_choice}"
-
-                if format_choice == 'flac':
-                    subprocess.run(['ffmpeg', '-n', '-i', input_path, output_path])
-                elif format_choice == 'mp3':
-                    subprocess.run(['ffmpeg', '-n', '-i', input_path, '-b:a', '320k', output_path])
-
-                audio = File(output_path, easy=True)
-                artist = audio.get('artist', ['Unknown Artist'])[0]
-                title = audio.get('title', ['Unknown Title'])[0]
-                for field in ['artist', 'title', 'album', 'genre']:
-                    if field in audio:
-                        audio[field] = [value.replace(";", ", ") for value in audio[field]]
-                audio.save()
-                final_name = f"{artist} - {title}.{format_choice}".replace(";", ", ")
-                final_path = os.path.join(root_path, final_name)
-                os.rename(output_path, final_path)
-
-                await client.send_file(event.chat_id, final_path)
-
-            shutil.rmtree(root_path)
-            del state[event.chat_id]
-
-        elif content_type == "track":
+        else:  # track
             download_dir = f'downloads/{components[-1]}'
             filename = os.listdir(download_dir)[0]
             filepath = f'{download_dir}/{filename}'
