@@ -5,6 +5,8 @@ import subprocess
 import json
 import zipfile
 import asyncio
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from telethon import TelegramClient, events, Button
@@ -17,6 +19,7 @@ session_name = 'beatport_downloader'
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
 beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\/\d+$'
+beatport_chart_pattern = r'^https:\/\/www\.beatport\.com\/chart\/.+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -533,6 +536,113 @@ async def playlist_handler(event):
 
 
 
+
+
+
+
+@client.on(events.NewMessage(pattern='/chart'))
+async def chart_handler(event):
+    try:
+        user_id = event.chat_id
+        args = event.message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await event.reply("❌ Please provide a Beatport chart link.")
+            return
+        input_text = args[1].strip()
+
+        # Validate link
+        if not re.match(beatport_chart_pattern, input_text):
+            await event.reply("❌ Invalid link.\nPlease send a valid Beatport chart URL.")
+            return
+
+        # Premium check
+        users = load_users()
+        user = users.get(str(user_id), {})
+        expiry = user.get("expiry")
+        if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
+            await event.reply("🚫 Chart downloads are only available for premium users.")
+            return
+
+        status = await event.reply("⬇️ Fetching chart tracks...")
+
+        # Parse chart ID
+        url = urlparse(input_text)
+        components = url.path.split('/')
+        chart_id = components[-1]
+        root_path = f'downloads/chart_{chart_id}'
+
+        os.makedirs(root_path, exist_ok=True)
+
+        # Scrape chart page to get track URLs
+        resp = requests.get(input_text)
+        if resp.status_code != 200:
+            await status.edit("⚠️ Failed to fetch chart page.")
+            return
+
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        track_links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if '/track/' in href:
+                track_url = f"https://www.beatport.com{href}" if href.startswith('/') else href
+                if track_url not in track_links:
+                    track_links.append(track_url)
+
+        if not track_links:
+            await status.edit("⚠️ No tracks found on this chart.")
+            return
+
+        # Download tracks using Orpheus
+        total_tracks = len(track_links)
+        done_bytes = 0
+        total_size = 0
+        start_time = time.time()
+
+        await status.edit(f"⬇️ Downloading {total_tracks} tracks...")
+
+        for idx, track_url in enumerate(track_links, 1):
+            os.system(f'python orpheus.py {track_url}')
+            # Sum total size after each download
+            track_id = urlparse(track_url).path.split('/')[-1]
+            track_dir = f'downloads/{track_id}'
+            if os.path.exists(track_dir):
+                for f in os.listdir(track_dir):
+                    file_path = os.path.join(track_dir, f)
+                    total_size += os.path.getsize(file_path)
+                    # Move file to chart root folder
+                    shutil.move(file_path, os.path.join(root_path, f))
+                shutil.rmtree(track_dir, ignore_errors=True)
+            await show_progress(status, done_bytes, total_size, start_time)
+
+        # Zip all tracks
+        zip_path = f"chart_{chart_id}.zip"
+        all_files = [os.path.join(root_path, f) for f in os.listdir(root_path)]
+        done_bytes = 0
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in all_files:
+                zipf.write(file_path, os.path.basename(file_path))
+                done_bytes += os.path.getsize(file_path)
+                await show_progress(status, done_bytes, total_size, start_time)
+                await asyncio.sleep(0)
+
+        # Upload with progress
+        async def upload_progress(current, total):
+            await show_progress(status, current, total, start_time)
+
+        await client.send_file(
+            event.chat_id,
+            zip_path,
+            force_document=True,
+            progress_callback=upload_progress
+        )
+
+        # Cleanup
+        shutil.rmtree(root_path, ignore_errors=True)
+        os.remove(zip_path)
+        await status.edit(f"✅ Done! Chart sent as chart_{chart_id}.zip")
+
+    except Exception as e:
+        await event.reply(f"⚠️ Error while processing chart: {e}")
 
 
 @client.on(events.NewMessage(pattern='/alert'))
