@@ -428,6 +428,7 @@ async def total_users_handler(event):
 
 
 
+
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
@@ -451,35 +452,14 @@ async def playlist_handler(event):
             await event.reply("🚫 Playlist downloads are only available for premium users.")
             return
 
-        status = await event.reply("🔎 Checking playlist info...")
+        status = await event.reply("⬇️ Starting playlist download...")
 
-        # === Extract playlist ID ===
+        # === Run Orpheus ===
         url = urlparse(input_text)
         components = url.path.split('/')
         playlist_id = components[-1]
         root_path = f'downloads/{playlist_id}'
 
-        # === Dry run to count tracks ===
-        cmd = f'python orpheus.py --dry-run {input_text}'
-        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-        # Try to detect number of tracks from Orpheus output
-        track_count = 0
-        for line in result.stdout.splitlines():
-            if "Track:" in line or "track" in line.lower():
-                track_count += 1
-
-        if track_count == 0:
-            await status.edit("⚠️ Could not detect track count. Aborting.")
-            return
-
-        if track_count > 20:
-            await status.edit(f"🚫 Playlist too large!\nThis bot only supports playlists up to 20 tracks.\nYour playlist has **{track_count} tracks**.")
-            return
-
-        await status.edit(f"⬇️ Playlist has {track_count} tracks. Starting download...")
-
-        # === Run Orpheus download ===
         os.system(f'python orpheus.py {input_text}')
 
         if not os.path.exists(root_path):
@@ -505,7 +485,6 @@ async def playlist_handler(event):
                 if audio:
                     artist = audio.get('artist', ['Unknown Artist'])[0]
                     title = audio.get('title', ['Unknown Title'])[0]
-                    album = audio.get('album', ['Unknown Album'])[0]
 
                     # Clean tags
                     for field in ['artist', 'title', 'album', 'genre']:
@@ -513,36 +492,32 @@ async def playlist_handler(event):
                             audio[field] = [v.replace(";", ", ") for v in audio[field]]
                     audio.save()
 
+                    # Final renamed path
                     safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
                     final_path = os.path.join(root, safe_name)
 
                     os.rename(tmp_output, final_path)
                     converted_files.append(final_path)
 
+                # remove original if different
                 if os.path.exists(input_path) and input_path != final_path:
                     os.remove(input_path)
 
-        # === Zip ===
-        zip_path = f"playlist_{playlist_id}.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in converted_files:
-                zipf.write(file_path, os.path.basename(file_path))
-
-        # === Upload ===
-        await client.send_file(
-            event.chat_id,
-            zip_path,
-            force_document=True
-        )
+        # === Upload files directly ===
+        for file_path in converted_files:
+            await client.send_file(
+                event.chat_id,
+                file_path,
+                force_document=True
+            )
+            await asyncio.sleep(2)  # small delay to avoid flood
 
         # === Cleanup ===
         shutil.rmtree(root_path, ignore_errors=True)
-        os.remove(zip_path)
-        await status.edit(f"✅ Done! Playlist sent as playlist_{playlist_id}.zip")
+        await status.edit(f"✅ Done! Sent {len(converted_files)} tracks from playlist {playlist_id}.")
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
-
 
 
 
