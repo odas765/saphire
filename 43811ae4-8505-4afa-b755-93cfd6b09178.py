@@ -16,7 +16,7 @@ session_name = 'beatport_downloader'
 
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
-beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlist\/[\w\-]+\/\d+$'
+beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -423,16 +423,35 @@ async def total_users_handler(event):
     await event.reply(f"👥 Total registered users: <b>{total}</b>", parse_mode='html')
 
 
+
+
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 def make_progress_bar(done, total, length=10):
-    if total == 0:
-        return "📦 [░░░░░░░░░░] 0%"
     filled = int(length * done / total)
     bar = "█" * filled + "░" * (length - filled)
-    percent = int((done / total) * 100)
-    return f"[{bar}] {percent}%"
+    percent = (done / total) * 100
+    return percent, f"[{bar}]"
+
+async def show_progress(status_message, done, total, start_time):
+    percent, bar = make_progress_bar(done, total)
+    elapsed = time.time() - start_time
+    speed = (done / 1024) / elapsed if elapsed > 0 else 0  # KB/sec
+    remaining = total - done
+    eta = remaining / 1024 / speed if speed > 0 else 0
+    msg = (
+        f"Downloading: {percent:.1f}%\n\n"
+        f"{bar}\n\n"
+        f"🚀 Speed: {speed:.2f} KB/sec\n"
+        f"✅ Done: {done / 1024:.1f} KB\n"
+        f"🔰 Size: {total / 1024 / 1024:.2f} MB\n"
+        f"⏰ Time Left: {int(eta // 60)} min {int(eta % 60)} sec"
+    )
+    try:
+        await status_message.edit(msg)
+    except:
+        pass
 
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
@@ -471,64 +490,36 @@ async def playlist_handler(event):
             await status.edit("⚠️ Failed to download playlist.")
             return
 
-        # === Collect files + metadata ===
-        track_count = 0
-        playlist_name = "Playlist"
-        cover_file = None
+        # === Collect files for zipping ===
         all_files = []
-
+        total_size = 0
         for root, _, files in os.walk(root_path):
             for file in files:
                 file_path = os.path.join(root, file)
                 arcname = os.path.relpath(file_path, root_path)
                 all_files.append((file_path, arcname))
-
-                if file.lower().endswith(('.flac', '.mp3', '.wav')):
-                    track_count += 1
-                    audio = File(file_path, easy=True)
-                    if audio and 'album' in audio and playlist_name == "Playlist":
-                        playlist_name = audio['album'][0]
-
-                if file.lower().startswith("cover") and file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    cover_file = file_path
-
-        caption = (
-            f"<b>📂 Playlist:</b> {playlist_name}\n"
-            f"<b>🎵 Total Tracks:</b> {track_count}"
-        )
-
-        if cover_file:
-            await client.send_file(event.chat_id, cover_file, caption=caption, parse_mode='html')
-        else:
-            await status.edit(caption, parse_mode='html')
+                total_size += os.path.getsize(file_path)
 
         # === Zip with progress ===
-        safe_name = sanitize_filename(playlist_name or "Playlist")
+        safe_name = sanitize_filename("Playlist")
         zip_path = f"{safe_name}.zip"
-        total_files = len(all_files)
-        done = 0
+        done_size = 0
+        start_time = time.time()
 
-        await status.edit(f"📦 Zipping files...\n{make_progress_bar(0, total_files)}")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for file_path, arcname in all_files:
                 zipf.write(file_path, arcname)
-                done += 1
-                if done % max(1, total_files // 10) == 0 or done == total_files:
-                    await status.edit(f"📦 Zipping files...\n{make_progress_bar(done, total_files)}")
-                await asyncio.sleep(0)
+                done_size += os.path.getsize(file_path)
+                await show_progress(status, done_size, total_size, start_time)
+                await asyncio.sleep(0)  # yield control
 
         # === Upload with progress ===
         async def upload_progress(current, total):
-            try:
-                bar = make_progress_bar(current, total)
-                await status.edit(f"⬆️ Uploading...\n{bar}")
-            except:
-                pass
+            await show_progress(status, current, total, time.time() - start_time)
 
         await client.send_file(
             event.chat_id,
             zip_path,
-            caption=f"📦 {playlist_name}",
             force_document=True,
             progress_callback=upload_progress
         )
@@ -540,9 +531,6 @@ async def playlist_handler(event):
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
-
-
-
 
 
 
