@@ -3,6 +3,7 @@ import time
 import re
 import shutil
 import subprocess
+import aiohttp
 import json
 import zipfile
 import asyncio
@@ -427,8 +428,30 @@ async def total_users_handler(event):
     await event.reply(f"👥 Total registered users: <b>{total}</b>", parse_mode='html')
 
 
+# === Beatport playlist downloader ===
+
+# === Pre-check track count from Beatport page ===
+async def get_playlist_track_count(playlist_id: str) -> int:
+    url = f"https://www.beatport.com/playlist/{playlist_id}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return -1
+            html = await resp.text()
+
+    # Extract the "playlist":{...} block
+    match = re.search(r'"playlist":({.*?})\s*,\s*"dehydratedState"', html, re.DOTALL)
+    if not match:
+        return -1
+
+    try:
+        playlist_data = json.loads(match.group(1))
+        return playlist_data.get("track_count", -1)
+    except Exception:
+        return -1
 
 
+# === /playlist handler ===
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
@@ -452,15 +475,45 @@ async def playlist_handler(event):
             await event.reply("🚫 Playlist downloads are only available for premium users.")
             return
 
-        status = await event.reply("⬇️ Starting playlist download...")
-
-        # === Run Orpheus ===
+        # === Extract playlist ID ===
         url = urlparse(input_text)
         components = url.path.split('/')
         playlist_id = components[-1]
-        root_path = f'downloads/{playlist_id}'
 
-        os.system(f'python orpheus.py {input_text}')
+        # === Pre-check Beatport track count ===
+        track_count = await get_playlist_track_count(playlist_id)
+        if track_count == -1:
+            await event.reply("⚠️ Could not verify playlist size. Try again later.")
+            return
+        if track_count > 20:
+            await event.reply(f"🚫 Playlist too large: {track_count} tracks. Limit is 20.")
+            return
+
+        # Save info for callback
+        await event.reply(
+            f"🎶 Playlist detected with **{track_count} tracks**.\nHow would you like to receive it?",
+            buttons=[
+                [Button.inline("📂 Direct Upload", data=f"playlist_direct|{playlist_id}|{input_text}")],
+                [Button.inline("📦 Zip Upload", data=f"playlist_zip|{playlist_id}|{input_text}")]
+            ]
+        )
+
+    except Exception as e:
+        await event.reply(f"⚠️ Error while processing playlist: {e}")
+
+
+# === Callback for upload choice ===
+@client.on(events.CallbackQuery(pattern=b"playlist_(direct|zip)\|(.*)\|(.*)"))
+async def playlist_upload_choice(event):
+    try:
+        choice, playlist_id, playlist_url = event.pattern_match.group(1).decode(), \
+                                            event.pattern_match.group(2).decode(), \
+                                            event.pattern_match.group(3).decode()
+
+        status = await event.edit(f"⬇️ Starting download for playlist `{playlist_id}` …")
+
+        root_path = f'downloads/{playlist_id}'
+        os.system(f'python orpheus.py {playlist_url}')
 
         if not os.path.exists(root_path):
             await status.edit("⚠️ Failed to download playlist.")
@@ -474,50 +527,58 @@ async def playlist_handler(event):
                 if not file.lower().endswith((".mp3", ".flac", ".wav", ".aiff", ".m4a")):
                     continue
 
-                # Temporary converted file
                 tmp_output = os.path.splitext(input_path)[0] + "_conv.flac"
-
-                # Convert to FLAC
                 subprocess.run(['ffmpeg', '-y', '-i', input_path, tmp_output])
 
-                # Read metadata
                 audio = File(tmp_output, easy=True)
                 if audio:
                     artist = audio.get('artist', ['Unknown Artist'])[0]
                     title = audio.get('title', ['Unknown Title'])[0]
 
-                    # Clean tags
                     for field in ['artist', 'title', 'album', 'genre']:
                         if field in audio:
                             audio[field] = [v.replace(";", ", ") for v in audio[field]]
                     audio.save()
 
-                    # Final renamed path
                     safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
                     final_path = os.path.join(root, safe_name)
 
                     os.rename(tmp_output, final_path)
                     converted_files.append(final_path)
 
-                # remove original if different
                 if os.path.exists(input_path) and input_path != final_path:
                     os.remove(input_path)
 
-        # === Upload files directly ===
-        for file_path in converted_files:
+        # === Upload depending on choice ===
+        if choice == "direct":
+            await status.edit(f"📂 Uploading {len(converted_files)} tracks directly …")
+            for idx, file_path in enumerate(converted_files, start=1):
+                await client.send_file(
+                    event.chat_id,
+                    file_path,
+                    caption=f"Track {idx}/{len(converted_files)}",
+                    force_document=True
+                )
+        else:  # zip
+            zip_path = f"{root_path}.zip"
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for file_path in converted_files:
+                    zipf.write(file_path, os.path.basename(file_path))
+
+            await status.edit(f"📦 Uploading ZIP with {len(converted_files)} tracks …")
             await client.send_file(
                 event.chat_id,
-                file_path,
-                force_document=True
+                zip_path,
+                caption=f"Playlist {playlist_id} ({len(converted_files)} tracks)"
             )
-            await asyncio.sleep(2)  # small delay to avoid flood
+            os.remove(zip_path)
 
         # === Cleanup ===
         shutil.rmtree(root_path, ignore_errors=True)
         await status.edit(f"✅ Done! Sent {len(converted_files)} tracks from playlist {playlist_id}.")
 
     except Exception as e:
-        await event.reply(f"⚠️ Error while processing playlist: {e}")
+        await event.edit(f"⚠️ Error while uploading playlist: {e}")
 
 
 
