@@ -14,6 +14,7 @@ session_name = 'beatport_downloader'
 
 beatport_track_pattern = r'^https:\/\/www\.beatport\.com\/track\/[\w\-]+\/\d+$'
 beatport_album_pattern = r'^https:\/\/www\.beatport\.com\/release\/[\w\-]+\/\d+$'
+beatport_playlist_pattern = r'^https:\/\/www\.beatport\.com\/playlists\/[\w\-]+\/\d+$'
 
 state = {}
 ADMIN_IDS = [616584208, 731116951, 769363217]
@@ -215,20 +216,21 @@ async def callback_query_handler(event):
         format_choice = event.data.decode('utf-8')
         url_info = state.get(event.chat_id)
         if not url_info:
-            await event.edit("No URL found. Please start again using /download.")
+            await event.edit("No URL found. Please start again using /download or /download_playlist.")
             return
 
         input_text = url_info["url"]
         content_type = url_info["type"]
         await event.edit(f"You selected {format_choice.upper()}. Downloading...")
 
+        # Run your external download script (orpheus.py)
+        os.system(f'python orpheus.py {input_text}')
+
         url = urlparse(input_text)
         components = url.path.split('/')
         release_id = components[-1]
 
-        # Run your external download script (orpheus.py)
-        os.system(f'python orpheus.py {input_text}')
-
+        # === ALBUM LOGIC ===
         if content_type == "album":
             root_path = f'downloads/{release_id}'
             flac_files = [f for f in os.listdir(root_path) if f.lower().endswith('.flac')]
@@ -298,7 +300,8 @@ async def callback_query_handler(event):
             increment_download(event.chat_id, content_type)
             del state[event.chat_id]
 
-        else:  # track
+        # === TRACK LOGIC ===
+        elif content_type == "track":
             download_dir = f'downloads/{components[-1]}'
             filename = os.listdir(download_dir)[0]
             filepath = f'{download_dir}/{filename}'
@@ -322,6 +325,46 @@ async def callback_query_handler(event):
             await client.send_file(event.chat_id, new_filepath)
             shutil.rmtree(download_dir)
             increment_download(event.chat_id, content_type)
+            del state[event.chat_id]
+
+        # === PLAYLIST LOGIC (WHITELIST ONLY) ===
+        elif content_type == "playlist":
+            users = load_users()
+            user = users.get(str(event.chat_id), {})
+            if not user.get('expiry') or datetime.strptime(user['expiry'], '%Y-%m-%d') < datetime.utcnow():
+                await event.edit("🚫 Playlist downloads are premium only.\n💳 Upgrade: " + PAYMENT_URL)
+                return
+
+            root_path = f'downloads/{release_id}'
+            files = [f for f in os.listdir(root_path) if f.lower().endswith('.flac')]
+            total_files = len(files)
+            zip_path = f'{root_path}.zip'
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for i, filename in enumerate(files, 1):
+                    input_path = os.path.join(root_path, filename)
+                    output_path = f"{input_path}.{format_choice}"
+                    if format_choice == 'flac':
+                        subprocess.run(['ffmpeg', '-n', '-i', input_path, output_path])
+                    elif format_choice == 'mp3':
+                        subprocess.run(['ffmpeg', '-n', '-i', input_path, '-b:a', '320k', output_path])
+
+                    audio = File(output_path, easy=True)
+                    artist = audio.get('artist', ['Unknown Artist'])[0]
+                    title = audio.get('title', ['Unknown Title'])[0]
+                    for field in ['artist', 'title', 'album', 'genre']:
+                        if field in audio:
+                            audio[field] = [value.replace(";", ", ") for value in audio[field]]
+                    audio.save()
+                    final_name = f"{artist} - {title}.{format_choice}".replace(";", ", ")
+                    zipf.write(output_path, final_name)
+                    # progress bar
+                    progress = int((i / total_files) * 10)
+                    bar = "█" * progress + "░" * (10 - progress)
+                    await event.edit(f"Downloading playlist: {i}/{total_files}\n[{bar}]")
+
+            shutil.rmtree(root_path)
+            await client.send_file(event.chat_id, zip_path)
+            os.remove(zip_path)
             del state[event.chat_id]
 
     except Exception as e:
@@ -379,6 +422,35 @@ async def admin_list_handler(event):
         except Exception:
             lines.append(f"• <code>{admin_id}</code> – [Could not fetch username]")
     await event.reply("\n".join(lines), parse_mode='html')
+
+@client.on(events.NewMessage(pattern='/download_playlist'))
+async def download_playlist_handler(event):
+    try:
+        user_id = event.chat_id
+        input_text = event.message.text.split(maxsplit=1)[1].strip()
+
+        if not re.match(beatport_playlist_pattern, input_text):
+            await event.reply("❌ Invalid playlist URL.\nPlease send a valid Beatport playlist URL.")
+            return
+
+        # Only whitelist/premium users can download playlists
+        users = load_users()
+        user = users.get(str(user_id), {})
+        if not user.get("expiry") or datetime.strptime(user["expiry"], "%Y-%m-%d") < datetime.utcnow():
+            await event.reply(
+                "🚫 Playlist download is available only for whitelisted/premium users.\n"
+                "Support $5 to get premium access for 30 days.",
+                buttons=[Button.url("💳 Pay $5", PAYMENT_URL)]
+            )
+            return
+
+        state[event.chat_id] = {"url": input_text, "type": "playlist"}
+        await event.reply("Please choose the format for the playlist:", buttons=[
+            [Button.inline("MP3 (320 kbps)", b"mp3"), Button.inline("FLAC (16 Bit)", b"flac")]
+        ])
+
+    except Exception as e:
+        await event.reply(f"An error occurred: {e}")
 
 
 @client.on(events.NewMessage(pattern='/whitelist'))
