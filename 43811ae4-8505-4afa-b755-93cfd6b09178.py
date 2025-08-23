@@ -560,6 +560,115 @@ async def callback_handler(event):
         await event.answer(f"⚠️ Error: {str(e)}", alert=True)
 
 
+@client.on(events.NewMessage(pattern='/chart'))
+async def chart_handler(event):
+    try:
+        user_id = event.chat_id
+        args = event.message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await event.reply("❌ Please provide a Beatport chart link.")
+            return
+        input_text = args[1].strip()
+
+        # === Validate chart link ===
+        beatport_chart_pattern = r'https?://(www\.)?beatport\.com/chart/[^/]+/\d+'
+        beatport_genre_chart_pattern = r'https?://(www\.)?beatport\.com/genre/[^/]+/\d+/(top-100|hype-100|top-100-releases)'
+
+        if not (re.match(beatport_chart_pattern, input_text) or re.match(beatport_genre_chart_pattern, input_text)):
+            await event.reply("❌ Invalid chart link.\nPlease send a valid Beatport chart URL.")
+            return
+
+        # === Premium check ===
+        users = load_users()
+        user = users.get(str(user_id), {})
+        expiry = user.get("expiry")
+        if not expiry or datetime.strptime(expiry, '%Y-%m-%d') <= datetime.utcnow():
+            await event.reply("🚫 Chart downloads are only available for premium users.")
+            return
+
+        status = await event.reply("⬇️ Starting chart download...")
+
+        # === Run Orpheus ===
+        url = urlparse(input_text)
+        components = url.path.split('/')
+        chart_id = components[-1]
+        root_path = f'downloads/{chart_id}'
+
+        os.system(f'python orpheus.py {input_text}')
+
+        if not os.path.exists(root_path):
+            await status.edit("⚠️ Failed to download chart.")
+            return
+
+        # === Convert tracks to FLAC & rename ===
+        converted_files = []
+        for root, _, files in os.walk(root_path):
+            for file in files:
+                input_path = os.path.join(root, file)
+                if not file.lower().endswith((".mp3", ".flac", ".wav", ".aiff", ".m4a")):
+                    continue
+
+                tmp_output = os.path.splitext(input_path)[0] + "_conv.flac"
+                subprocess.run(['ffmpeg', '-y', '-i', input_path, tmp_output])
+
+                audio = File(tmp_output, easy=True)
+                if audio:
+                    artist = audio.get('artist', ['Unknown Artist'])[0]
+                    title = audio.get('title', ['Unknown Title'])[0]
+                    for field in ['artist', 'title', 'album', 'genre']:
+                        if field in audio:
+                            audio[field] = [v.replace(";", ", ") for v in audio[field]]
+                    audio.save()
+                    safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
+                    final_path = os.path.join(root, safe_name)
+                    os.rename(tmp_output, final_path)
+                    converted_files.append(final_path)
+
+                if os.path.exists(input_path) and input_path != final_path:
+                    os.remove(input_path)
+
+        # === Create zip (split if >2GB) ===
+        zip_base = f"chart_{chart_id}.zip"
+        max_size = 2 * 1024 * 1024 * 1024  # 2GB
+        part = 1
+        zip_path = f"{zip_base}.part{part}"
+
+        zipf = zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED)
+        current_size = 0
+
+        zip_paths = [zip_path]
+
+        for file_path in converted_files:
+            zipf.write(file_path, os.path.basename(file_path))
+            current_size = os.path.getsize(zip_path)
+            if current_size >= max_size:
+                zipf.close()
+                part += 1
+                zip_path = f"{zip_base}.part{part}"
+                zip_paths.append(zip_path)
+                zipf = zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED)
+
+        zipf.close()
+
+        # === Upload ===
+        for zp in zip_paths:
+            await client.send_file(
+                event.chat_id,
+                zp,
+                force_document=True
+            )
+
+        # === Cleanup ===
+        shutil.rmtree(root_path, ignore_errors=True)
+        for zp in zip_paths:
+            os.remove(zp)
+
+        await status.edit("✅ Done! Chart sent as zip file(s).")
+
+    except Exception as e:
+        await event.reply(f"⚠️ Error while processing chart: {e}")
+
+
 
 @client.on(events.NewMessage(pattern='/alert'))
 async def alert_expiry_handler(event):
