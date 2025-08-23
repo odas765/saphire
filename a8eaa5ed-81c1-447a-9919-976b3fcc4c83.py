@@ -307,6 +307,16 @@ class ModuleInterface:
             playlist_tracks = [t.get('track') for t in playlist_tracks_data.get('results')]
 
         total_tracks = playlist_tracks_data.get('count')
+
+
+        # === HARD LIMIT: Reject playlists bigger than 20 ===
+        MAX_PLAYLIST_TRACKS = 20
+        from orpheus.core.exceptions import ModuleError
+        if total_tracks and total_tracks > MAX_PLAYLIST_TRACKS:
+            raise ModuleError(
+                f"🚫 Playlist has {total_tracks} tracks which exceeds the limit of {MAX_PLAYLIST_TRACKS}."
+            )
+        # === END HARD LIMIT ===
         for page in range(2, (total_tracks - 1) // 100 + 2):
             print(f'Fetching {len(playlist_tracks)}/{total_tracks}', end='\r')
             # get the DJ chart or user playlist
