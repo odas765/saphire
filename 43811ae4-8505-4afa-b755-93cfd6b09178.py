@@ -425,6 +425,9 @@ async def total_users_handler(event):
 
 
 
+# Temporary storage for user choices (dict: user_id -> {"playlist_id":..., "files":...})
+pending_uploads = {}
+
 @client.on(events.NewMessage(pattern='/playlist'))
 async def playlist_handler(event):
     try:
@@ -470,57 +473,91 @@ async def playlist_handler(event):
                 if not file.lower().endswith((".mp3", ".flac", ".wav", ".aiff", ".m4a")):
                     continue
 
-                # Temporary converted file
                 tmp_output = os.path.splitext(input_path)[0] + "_conv.flac"
-
-                # Convert to FLAC
                 subprocess.run(['ffmpeg', '-y', '-i', input_path, tmp_output])
 
-                # Read metadata
                 audio = File(tmp_output, easy=True)
                 if audio:
                     artist = audio.get('artist', ['Unknown Artist'])[0]
                     title = audio.get('title', ['Unknown Title'])[0]
-                    album = audio.get('album', ['Unknown Album'])[0]
 
-                    # Clean tags (replace semicolons with commas)
                     for field in ['artist', 'title', 'album', 'genre']:
                         if field in audio:
                             audio[field] = [v.replace(";", ", ") for v in audio[field]]
                     audio.save()
 
-                    # Final renamed path
                     safe_name = f"{artist} - {title}.flac".replace(";", ", ").replace("/", "_")
                     final_path = os.path.join(root, safe_name)
 
-                    # Replace/rename converted file
                     os.rename(tmp_output, final_path)
                     converted_files.append(final_path)
 
-                # remove original if different
                 if os.path.exists(input_path) and input_path != final_path:
                     os.remove(input_path)
 
-        # === Zip ===
-        zip_path = f"playlist_{playlist_id}.zip"
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in converted_files:
-                zipf.write(file_path, os.path.basename(file_path))
+        # Save upload info for user
+        pending_uploads[user_id] = {
+            "playlist_id": playlist_id,
+            "files": converted_files,
+            "root_path": root_path
+        }
 
-        # === Upload ===
-        await client.send_file(
-            event.chat_id,
-            zip_path,
-            force_document=True
+        # Ask user for choice
+        await status.edit(
+            "✅ Playlist is ready! How would you like to receive it?",
+            buttons=[
+                [Button.inline("📂 Direct Upload", f"direct:{user_id}")],
+                [Button.inline("📦 Zip Upload", f"zip:{user_id}")]
+            ]
         )
-
-        # === Cleanup ===
-        shutil.rmtree(root_path, ignore_errors=True)
-        os.remove(zip_path)
-        await status.edit(f"✅ Done! Playlist sent as playlist_{playlist_id}.zip")
 
     except Exception as e:
         await event.reply(f"⚠️ Error while processing playlist: {e}")
+
+
+# === Handle upload choice ===
+@client.on(events.CallbackQuery)
+async def callback_handler(event):
+    try:
+        data = event.data.decode("utf-8")
+        if data.startswith("direct:") or data.startswith("zip:"):
+            user_id = int(data.split(":")[1])
+
+            if user_id != event.sender_id:
+                await event.answer("⛔ This choice is not for you!", alert=True)
+                return
+
+            if user_id not in pending_uploads:
+                await event.answer("⚠️ No pending playlist found.", alert=True)
+                return
+
+            info = pending_uploads.pop(user_id)
+            playlist_id = info["playlist_id"]
+            files = info["files"]
+            root_path = info["root_path"]
+
+            if data.startswith("direct:"):
+                await event.edit("📂 Uploading files directly...")
+                for file_path in files:
+                    await client.send_file(user_id, file_path, force_document=True)
+                    await asyncio.sleep(2)
+                shutil.rmtree(root_path, ignore_errors=True)
+                await event.edit("✅ Done! All tracks uploaded directly.")
+
+            elif data.startswith("zip:"):
+                await event.edit("📦 Creating zip file...")
+                zip_path = f"playlist_{playlist_id}.zip"
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in files:
+                        zipf.write(file_path, os.path.basename(file_path))
+
+                await client.send_file(user_id, zip_path, force_document=True)
+                shutil.rmtree(root_path, ignore_errors=True)
+                os.remove(zip_path)
+                await event.edit(f"✅ Done! Playlist sent as playlist_{playlist_id}.zip")
+
+    except Exception as e:
+        await event.answer(f"⚠️ Error: {str(e)}", alert=True)
 
 
 
